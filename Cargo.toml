@@ -1,0 +1,8 @@
+[package]
+name = "joinpool"
+version = "0.1.0"
+authors = ["bluss <>"]
+edition = "2018"
+
+[dependencies]
+crossbeam-channel = "0.3"
