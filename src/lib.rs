@@ -3,122 +3,13 @@
 // Based on rayon-core by Niko Matsakis and Josh Stone
 use crossbeam_channel::{Sender, Receiver, bounded};
 
-use std::mem;
 use std::thread;
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+mod unwind;
+mod job;
 
+use crate::job::{JobRef, StackJob};
 
-// from rayon
-pub enum JobResult<T> {
-    None,
-    Ok(T),
-    Panic(Box<Any + Send>),
-}
-
-// from rayon
-struct StackJob<F, R> {
-    func: UnsafeCell<Option<F>>,
-    result: UnsafeCell<JobResult<R>>,
-    latch: AtomicBool,
-}
-
-impl<F, R> StackJob<F, R> {
-    fn new(f: F) -> Self
-        where F: FnOnce() -> R + Send
-    {
-        Self {
-            func: UnsafeCell::new(Some(f)),
-            result: UnsafeCell::new(JobResult::None),
-            latch: AtomicBool::new(false),
-        }
-    }
-
-    fn into_result(self) -> R {
-        unsafe {
-            assert!((*self.func.get()).is_none());
-            match mem::replace(&mut *self.result.get(), JobResult::None) {
-                JobResult::None => unreachable!(),
-                JobResult::Ok(r) => r,
-                JobResult::Panic(x) => resume_unwinding(x),
-            }
-        }
-    }
-}
-
-impl<F, R> Job for StackJob<F, R>
-where
-    //L: Latch + Sync,
-    F: FnOnce() -> R + Send,
-    R: Send,
-{
-    unsafe fn execute(this: *const Self) {
-        let this = &*this;
-        let abort = AbortIfPanic;
-        let func = (*this.func.get()).take().unwrap();
-        (*this.result.get()) = match halt_unwinding(|| func()) {
-            Ok(x) => JobResult::Ok(x),
-            Err(x) => JobResult::Panic(x),
-        };
-        this.latch.store(true, Ordering::SeqCst);
-        //this.latch.set();
-        mem::forget(abort);
-    }
-}
-
-
-/// A `Job` is used to advertise work for other threads that they may
-/// want to steal. In accordance with time honored tradition, jobs are
-/// arranged in a deque, so that thieves can take from the top of the
-/// deque while the main worker manages the bottom of the deque. This
-/// deque is managed by the `thread_pool` module.
-pub trait Job {
-    /// Unsafe: this may be called from a different thread than the one
-    /// which scheduled the job, so the implementer must ensure the
-    /// appropriate traits are met, whether `Send`, `Sync`, or both.
-    unsafe fn execute(this: *const Self);
-}
-
-/// Effectively a Job trait object. Each JobRef **must** be executed
-/// exactly once, or else data may leak.
-///
-/// Internally, we store the job's data in a `*const ()` pointer.  The
-/// true type is something like `*const StackJob<...>`, but we hide
-/// it. We also carry the "execute fn" from the `Job` trait.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct JobRef {
-    pointer: *const (),
-    execute_fn: unsafe fn(*const ()),
-}
-
-unsafe impl Send for JobRef {}
-unsafe impl Sync for JobRef {}
-
-impl JobRef {
-    /// Unsafe: caller asserts that `data` will remain valid until the
-    /// job is executed.
-    pub unsafe fn new<T>(data: *const T) -> JobRef
-    where
-        T: Job + Send,
-    {
-        let fn_ptr: unsafe fn(*const T) = <T as Job>::execute;
-
-        // erase types:
-        let fn_ptr: unsafe fn(*const ()) = mem::transmute(fn_ptr);
-        let pointer = data as *const ();
-
-        JobRef {
-            pointer: pointer,
-            execute_fn: fn_ptr,
-        }
-    }
-
-    #[inline]
-    pub unsafe fn execute(&self) {
-        (self.execute_fn)(self.pointer)
-    }
-}
 
 
 #[derive(Debug)]
@@ -190,7 +81,7 @@ impl ThreadPool {
                 job_ref.execute();
             } else {
                 // ensure job finishes
-                while !g_job.latch.load(Ordering::SeqCst) {
+                while !g_job.probe() {
                     //spin_loop_hint();
                     thread::yield_now();
                 }
@@ -303,40 +194,3 @@ mod tests {
     }
 }
 
-
-// Package up unwind recovery. Note that if you are in some sensitive
-// place, you can use the `AbortIfPanic` helper to protect against
-// accidental panics in the rayon code itself.
-
-use std::any::Any;
-use std::io::prelude::*;
-use std::io::stderr;
-use std::panic::{self, AssertUnwindSafe};
-
-/// Executes `f` and captures any panic, translating that panic into a
-/// `Err` result. The assumption is that any panic will be propagated
-/// later with `resume_unwinding`, and hence `f` can be treated as
-/// exception safe.
-pub fn halt_unwinding<F, R>(func: F) -> thread::Result<R>
-where
-    F: FnOnce() -> R,
-{
-    panic::catch_unwind(AssertUnwindSafe(func))
-}
-
-pub fn resume_unwinding(payload: Box<Any + Send>) -> ! {
-    panic::resume_unwind(payload)
-}
-
-pub struct AbortIfPanic;
-
-fn aborting() {
-    let _ = writeln!(&mut stderr(), "Rayon: detected unexpected panic; aborting");
-}
-
-impl Drop for AbortIfPanic {
-    fn drop(&mut self) {
-        aborting();
-        ::std::process::abort(); // stable in rust 1.17
-    }
-}
