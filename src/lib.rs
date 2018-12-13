@@ -3,7 +3,6 @@
 // Based on rayon-core by Niko Matsakis and Josh Stone
 use crossbeam_channel::{Sender, Receiver, bounded};
 
-use std::mem;
 use std::thread;
 
 mod unwind;
@@ -52,19 +51,11 @@ impl ThreadPool {
         let local = self.local_info();
         std::thread::spawn(move || {
             let my_local = local;
-            #[cfg(test)]
-            let id = &my_local as *const _;
-            #[cfg(test)]
-            println!("{:p}: Starting with {:?}", id, my_local);
             for job in my_local.receiver {
-                #[cfg(test)]
-                println!("{:p}: got a job", id);
                 unsafe {
                     job.execute();
                 }
             }
-            #[cfg(test)]
-            println!("{:p}: disconnected .. exiting", id);
         });
     }
 
