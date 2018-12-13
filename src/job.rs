@@ -32,7 +32,7 @@ impl<F, R> StackJob<F, R> {
     #[inline]
     pub fn into_result(self) -> R {
         unsafe {
-            assert!((*self.func.get()).is_none());
+            debug_assert!((*self.func.get()).is_none());
             match mem::replace(&mut *self.result.get(), JobResult::None) {
                 JobResult::None => unreachable!(),
                 JobResult::Ok(r) => r,
