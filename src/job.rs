@@ -29,6 +29,7 @@ impl<F, R> StackJob<F, R> {
         }
     }
 
+    #[inline]
     pub fn into_result(self) -> R {
         unsafe {
             assert!((*self.func.get()).is_none());
@@ -50,6 +51,7 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    #[inline]
     unsafe fn execute(this: *const Self) {
         let this = &*this;
         let abort = unwind::AbortIfPanic;
