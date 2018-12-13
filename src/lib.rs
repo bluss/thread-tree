@@ -121,6 +121,8 @@ impl ThreadPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     #[allow(deprecated)]
     fn sleep_ms(x: u32) {
         std::thread::sleep_ms(x)
@@ -191,6 +193,30 @@ mod tests {
     fn panic_b() {
         let pool = ThreadPool::new(2);
         pool.join(|| 1 + 1, || panic!());
+    }
+
+    #[test]
+    fn on_panic_a_wait_for_b() {
+        let pool = ThreadPool::new(2);
+        for i in 0..3 {
+            let start = AtomicUsize::new(0);
+            let finish = AtomicUsize::new(0);
+            let result = unwind::halt_unwinding(|| {
+                pool.join(
+                    || panic!("Panic in A"),
+                    || {
+                        start.fetch_add(1, Ordering::SeqCst);
+                        sleep_ms(50);
+                        finish.fetch_add(1, Ordering::SeqCst);
+                    });
+            });
+            let start_count = start.load(Ordering::SeqCst);
+            let finish_count = finish.load(Ordering::SeqCst);
+            assert_eq!(start_count, finish_count);
+            assert!(result.is_err());
+            println!("Pass {} with start: {} == finish {}", i,
+                     start_count, finish_count);
+        }
     }
 }
 
