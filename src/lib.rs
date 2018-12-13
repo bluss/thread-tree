@@ -3,6 +3,7 @@
 // Based on rayon-core by Niko Matsakis and Josh Stone
 use crossbeam_channel::{Sender, Receiver, bounded};
 
+use std::mem;
 use std::thread;
 
 mod unwind;
@@ -10,7 +11,11 @@ mod job;
 
 use crate::job::{JobRef, StackJob};
 
+macro_rules! debug {
+    ($($t:tt)*) => { $($t)* }
+}
 
+macro_rules! debug { ($($t:tt)*) => {} }
 
 #[derive(Debug)]
 pub struct ThreadPool {
@@ -63,30 +68,41 @@ impl ThreadPool {
         });
     }
 
-    pub fn join<A, B, RA, RB>(&self, f: A, g: B) -> (RA, RB)
+    pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where A: FnOnce() -> RA + Send,
               B: FnOnce() -> RB + Send,
               RA: Send,
               RB: Send,
     {
-        // first take care of g, if any thread is idle
-        let g_job = StackJob::new(g); // plant this safely on the stack
         unsafe {
-            let g_in_return = match self.sender.try_send(JobRef::new(&g_job)) {
+            // first send B, if any thread is idle
+            let b_job = StackJob::new(b); // plant this safely on the stack
+            let b_runs_here = match self.sender.try_send(JobRef::new(&b_job)) {
                 Ok(_) => None,
                 Err(e) => Some(e.into_inner()),
             };
-            let ra = f();
-            if let Some(job_ref) = g_in_return {
-                job_ref.execute();
-            } else {
-                // ensure job finishes
-                while !g_job.probe() {
-                    //spin_loop_hint();
-                    thread::yield_now();
+            let a_result;
+            {
+                // Ensure that we will later wait for B, if it is running on
+                // another thread. Both in the case of A panic or regular scope exit.
+                //
+                // If job A panics, we still cannot return until we are sure that job
+                // B is complete. This is because it may contain references into the
+                // enclosing stack frame(s).
+                let _wait_for_b_guard = match b_runs_here {
+                    None => Some(WaitForJobGuard::new(&b_job)),
+                    Some(_) => None,
+                };
+
+                // Execute task A
+                a_result = a();
+
+                if let Some(b_job_ref) = b_runs_here {
+                    b_job_ref.execute();
                 }
+                // wait for b here
             }
-            (ra, g_job.into_result())
+            (a_result, b_job.into_result())
         }
     }
 
@@ -112,11 +128,31 @@ impl ThreadPool {
             }
         }
     }
-
 }
 
+fn wait_for_job<F, R>(job: &StackJob<F, R>) {
+    while !job.probe() {
+        //spin_loop_hint();
+        thread::yield_now();
+    }
+}
 
+struct WaitForJobGuard<'a, F, R> {
+    job: &'a StackJob<F, R>,
+}
 
+impl<'a, F, R> WaitForJobGuard<'a, F, R>
+{
+    fn new(job: &'a StackJob<F, R>) -> Self {
+        Self { job }
+    }
+}
+
+impl<'a, F, R> Drop for WaitForJobGuard<'a, F, R> {
+    fn drop(&mut self) {
+        wait_for_job(self.job)
+    }
+}
 
 #[cfg(test)]
 mod tests {
