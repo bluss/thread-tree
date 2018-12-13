@@ -196,6 +196,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn panic_both() {
+        let pool = ThreadPool::new(2);
+        pool.join(|| { sleep_ms(50); panic!("Panic in A") }, || panic!("Panic in B"));
+    }
+
+    #[test]
     fn on_panic_a_wait_for_b() {
         let pool = ThreadPool::new(2);
         for i in 0..3 {
