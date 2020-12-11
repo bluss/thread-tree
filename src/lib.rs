@@ -2,6 +2,9 @@
 
 // Based on rayon-core by Niko Matsakis and Josh Stone
 use crossbeam_channel::{Sender, Receiver, bounded};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use std::thread;
 
@@ -16,10 +19,88 @@ macro_rules! debug {
 
 macro_rules! debug { ($($t:tt)*) => {} }
 
+type Message = JobRef;
+enum GroupMessage {
+    NewGroup(Receiver<Message>),
+    Free
+}
+
+#[derive(Debug)]
+pub struct ThreadSea {
+    sender: Sender<GroupMessage>,
+    receiver: Receiver<GroupMessage>,
+    thread_count: AtomicUsize,
+    threads_idle: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct SeaLocalInfo {
+    receiver: Receiver<GroupMessage>,
+    threads_idle: Arc<AtomicUsize>,
+}
+
+
+impl ThreadSea {
+    pub fn new(thread_count: usize) -> Self {
+        let (sender, receiver) = bounded(4); // magic var
+        let nthreads = thread_count;
+        let thread_count = AtomicUsize::new(nthreads);
+        let threads_idle = Arc::new(AtomicUsize::new(nthreads));
+        let pool = ThreadSea { sender, receiver, threads_idle, thread_count };
+        for _ in 0..nthreads {
+            pool.add_thread();
+        }
+        pool
+    }
+
+    pub fn thread_count(&self) -> usize { self.thread_count.load(Ordering::Acquire) }
+
+    pub fn reserve(&self, thread_count: usize) -> ThreadPool {
+        let (sender, receiver) = bounded(0); // rendezvous channel
+        for _ in 0..thread_count {
+            self.sender.send(GroupMessage::NewGroup(receiver.clone())).unwrap();
+        }
+        ThreadPool {
+            sender,
+            thread_count
+        }
+    }
+
+    fn local_info(&self) -> SeaLocalInfo {
+        let receiver = self.receiver.clone();
+        let threads_idle = self.threads_idle.clone();
+        SeaLocalInfo { receiver, threads_idle }
+    }
+
+
+    fn add_thread(&self) {
+        let local = self.local_info();
+        std::thread::spawn(move || {
+            let my_local = local;
+            for group_msg in my_local.receiver {
+                match group_msg {
+                    GroupMessage::NewGroup(channel) => {
+                        my_local.threads_idle.fetch_sub(1, Ordering::Release);
+                        // We got reserved for a thread pool
+                        for job in channel {
+                            unsafe {
+                                job.execute()
+                            }
+                        }
+                        // sender dropped, so we leave the group
+                        my_local.threads_idle.fetch_add(1, Ordering::Release);
+                    }
+                    GroupMessage::Free => {}
+                }
+            }
+        });
+    }
+}
+
+
 #[derive(Debug)]
 pub struct ThreadPool {
     sender: Sender<JobRef>,
-    receiver: Receiver<JobRef>,
     thread_count: usize,
 }
 
@@ -31,24 +112,24 @@ struct LocalInfo {
 
 impl ThreadPool {
     pub fn new(thread_count: usize) -> Self {
-        let (sender, receiver) = bounded::<JobRef>(0); // rendezvous channel
-        let pool = ThreadPool { sender, receiver, thread_count };
+        let (sender, receiver) = bounded(0); // rendezvous
+        let pool = ThreadPool { sender, thread_count };
         for _ in 0..thread_count {
-            pool.add_thread();
+            pool.add_thread(&receiver);
         }
         pool
     }
 
     pub fn thread_count(&self) -> usize { self.thread_count }
 
-    fn local_info(&self) -> LocalInfo {
-        let receiver = self.receiver.clone();
+    fn local_info(&self, receiver: &Receiver<JobRef>) -> LocalInfo {
+        let receiver = receiver.clone();
         LocalInfo { receiver }
     }
 
 
-    fn add_thread(&self) {
-        let local = self.local_info();
+    fn add_thread(&self, receiver: &Receiver<JobRef>) {
+        let local = LocalInfo { receiver: receiver.clone() };
         std::thread::spawn(move || {
             let my_local = local;
             for job in my_local.receiver {
@@ -68,7 +149,8 @@ impl ThreadPool {
         unsafe {
             // first send B, if any thread is idle
             let b_job = StackJob::new(b); // plant this safely on the stack
-            let b_runs_here = match self.sender.try_send(JobRef::new(&b_job)) {
+            let b_job_ref = JobRef::new(&b_job);
+            let b_runs_here = match self.sender.try_send(b_job_ref) {
                 Ok(_) => None,
                 Err(e) => Some(e.into_inner()),
             };
