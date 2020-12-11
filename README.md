@@ -12,3 +12,11 @@ This is not good for:
 
 - You need work stealing
 - When you have jobs of uneven size
+
+
+
+Ideas
+
+Always have threads >= 1
+
+Shrink threads by messaging Exit message - first thread to pick up, is free and exits
