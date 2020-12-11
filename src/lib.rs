@@ -97,25 +97,25 @@ impl ThreadPool {
         }
     }
 
-    pub fn recursive_join<S, FS, FA>(&self, seed: S, splitter: FS, apply: FA)
+    pub fn recursive_join<S, FS, FA>(&self, seed: S, splitter: FS, for_each: FA)
         where FS: Fn(S) -> (S, Option<S>) + Sync,
               FA: Fn(S) + Sync,
               S: Send,
     {
-        self.recursive_join_(seed, &splitter, &apply);
+        self.recursive_join_(seed, &splitter, &for_each);
     }
 
-    fn recursive_join_<S, FS, FA>(&self, seed: S, splitter: &FS, apply: &FA)
+    fn recursive_join_<S, FS, FA>(&self, seed: S, splitter: &FS, for_each: &FA)
         where FS: Fn(S) -> (S, Option<S>) + Sync,
               FA: Fn(S) + Sync,
               S: Send
     {
         match splitter(seed) {
-            (single, None) => apply(single),
+            (single, None) => for_each(single),
             (first, Some(second)) => {
                 self.join(
-                    move || self.recursive_join_(first, splitter, apply),
-                    move || self.recursive_join_(second, splitter, apply));
+                    move || self.recursive_join_(first, splitter, for_each),
+                    move || self.recursive_join_(second, splitter, for_each));
             }
         }
     }
