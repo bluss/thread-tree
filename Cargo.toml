@@ -5,4 +5,4 @@ authors = ["bluss <>"]
 edition = "2018"
 
 [dependencies]
-crossbeam-channel = "0.3"
+crossbeam-channel = "0.5"
