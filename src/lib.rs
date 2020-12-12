@@ -1,7 +1,7 @@
 
 
 // Based on rayon-core by Niko Matsakis and Josh Stone
-use crossbeam_channel::{Sender, Receiver, bounded};
+use crossbeam_channel::{Sender, Receiver, unbounded, bounded};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,35 +21,35 @@ macro_rules! debug {
 macro_rules! debug { ($($t:tt)*) => {} }
 
 type Message = JobRef;
-enum GroupMessage {
-    NewGroup(Receiver<Message>),
-    Free
-}
+type GroupMessage = Receiver<Message>;
 
 #[derive(Debug)]
 pub struct ThreadSea {
     sender: Sender<GroupMessage>,
     receiver: Receiver<GroupMessage>,
     thread_count: AtomicUsize,
-    threads_idle: Arc<AtomicUsize>,
+    threads_available: Arc<AtomicUsize>,
     grow_lock: Mutex<()>,
+    thread_id: AtomicUsize,
 }
 
 #[derive(Debug)]
 struct SeaLocalInfo {
     receiver: Receiver<GroupMessage>,
-    threads_idle: Arc<AtomicUsize>,
+    threads_available: Arc<AtomicUsize>,
+    thread_id: usize,
 }
 
 
 impl ThreadSea {
     pub fn new(thread_count: usize) -> Self {
-        let (sender, receiver) = bounded(4); // magic var
+        let (sender, receiver) = unbounded(); // magic var
         let nthreads = thread_count;
         let thread_count = AtomicUsize::new(nthreads);
-        let threads_idle = Arc::new(AtomicUsize::new(nthreads));
+        let threads_available = Arc::new(AtomicUsize::new(nthreads));
         let grow_lock = Mutex::default();
-        let pool = ThreadSea { sender, receiver, threads_idle, thread_count, grow_lock, };
+        let thread_id = AtomicUsize::new(0);
+        let pool = ThreadSea { sender, receiver, threads_available, thread_count, grow_lock, thread_id };
         for _ in 0..nthreads {
             pool.add_thread();
         }
@@ -59,27 +59,29 @@ impl ThreadSea {
     pub fn thread_count(&self) -> usize { self.thread_count.load(Ordering::Acquire) }
 
     pub fn reserve(&self, thread_count: usize) -> ThreadPool {
+        /*
         let _guard = self.grow_lock.lock();
         let cur_threads = self.thread_count.load(Ordering::Acquire);
-        let cur_idle = self.threads_idle.load(Ordering::Acquire);
-        let idle_sub;
-        if thread_count > cur_idle {
-            let gap = thread_count - cur_idle;
+        let cur_available = self.threads_available.load(Ordering::Acquire);
+        let used_available_threads;
+        if false && thread_count > cur_available {
+            let gap = thread_count - cur_available;
             //dbg!("Adding threads", gap);
             for _ in 0..gap {
                 self.add_thread();
             }
             self.thread_count.fetch_add(gap, Ordering::Release);
-            idle_sub = cur_idle;
+            used_available_threads = cur_available;
         } else {
-            idle_sub = thread_count;
+            used_available_threads = thread_count;
         }
-        self.threads_idle.fetch_sub(idle_sub, Ordering::Release);
+        //self.threads_available.fetch_sub(used_available_threads, Ordering::Release);
         drop(_guard);
+        */
 
         let (sender, receiver) = bounded(0); // rendezvous channel
         for _ in 0..thread_count {
-            self.sender.send(GroupMessage::NewGroup(receiver.clone())).unwrap();
+            self.sender.send(receiver.clone()).unwrap();
         }
         ThreadPool {
             sender,
@@ -89,8 +91,9 @@ impl ThreadSea {
 
     fn local_info(&self) -> SeaLocalInfo {
         let receiver = self.receiver.clone();
-        let threads_idle = self.threads_idle.clone();
-        SeaLocalInfo { receiver, threads_idle }
+        let threads_available = self.threads_available.clone();
+        let thread_id = self.thread_id.fetch_add(1, Ordering::Relaxed);
+        SeaLocalInfo { receiver, threads_available, thread_id }
     }
 
 
@@ -98,22 +101,17 @@ impl ThreadSea {
         let local = self.local_info();
         std::thread::spawn(move || {
             let my_local = local;
-            for group_msg in my_local.receiver {
-                match group_msg {
-                    GroupMessage::NewGroup(channel) => {
-                        //my_local.threads_idle.fetch_sub(1, Ordering::Release);
-                        // We got reserved for a thread pool
-                        for job in channel {
-                            unsafe {
-                                job.execute()
-                            }
-                        }
-                        // sender dropped, so we leave the group
-                        //dbg!("Thread back to idle");
-                        my_local.threads_idle.fetch_sub(1, Ordering::Release);
+            for channel in my_local.receiver {
+                // We got reserved for a thread pool
+                //eprintln!("Thread start {}", my_local.thread_id);
+                for job in channel {
+                    unsafe {
+                        job.execute()
                     }
-                    GroupMessage::Free => {}
                 }
+                // sender dropped, so we leave the group
+                //eprintln!("Thread idle {}", my_local.thread_id);
+                //my_local.threads_available.fetch_sub(1, Ordering::Release);
             }
         });
     }
@@ -143,12 +141,6 @@ impl ThreadPool {
     }
 
     pub fn thread_count(&self) -> usize { self.thread_count }
-
-    fn local_info(&self, receiver: &Receiver<JobRef>) -> LocalInfo {
-        let receiver = receiver.clone();
-        LocalInfo { receiver }
-    }
-
 
     fn add_thread(&self, receiver: &Receiver<JobRef>) {
         let local = LocalInfo { receiver: receiver.clone() };
@@ -387,8 +379,8 @@ mod sea_tests {
         |value| {
             println!("Thread: {:?}", value);
         });
-        drop(pool1);
         let pool2 = sea.reserve(50);
+        drop(pool1);
 
         pool2.recursive_join(0..127, |x| {
             let len = x.end - x.start;
