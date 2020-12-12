@@ -5,6 +5,7 @@ use crossbeam_channel::{Sender, Receiver, bounded};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use parking_lot::Mutex;
 
 use std::thread;
 
@@ -31,6 +32,7 @@ pub struct ThreadSea {
     receiver: Receiver<GroupMessage>,
     thread_count: AtomicUsize,
     threads_idle: Arc<AtomicUsize>,
+    grow_lock: Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -46,7 +48,8 @@ impl ThreadSea {
         let nthreads = thread_count;
         let thread_count = AtomicUsize::new(nthreads);
         let threads_idle = Arc::new(AtomicUsize::new(nthreads));
-        let pool = ThreadSea { sender, receiver, threads_idle, thread_count };
+        let grow_lock = Mutex::default();
+        let pool = ThreadSea { sender, receiver, threads_idle, thread_count, grow_lock, };
         for _ in 0..nthreads {
             pool.add_thread();
         }
@@ -56,6 +59,24 @@ impl ThreadSea {
     pub fn thread_count(&self) -> usize { self.thread_count.load(Ordering::Acquire) }
 
     pub fn reserve(&self, thread_count: usize) -> ThreadPool {
+        let _guard = self.grow_lock.lock();
+        let cur_threads = self.thread_count.load(Ordering::Acquire);
+        let cur_idle = self.threads_idle.load(Ordering::Acquire);
+        let idle_sub;
+        if thread_count > cur_idle {
+            let gap = thread_count - cur_idle;
+            //dbg!("Adding threads", gap);
+            for _ in 0..gap {
+                self.add_thread();
+            }
+            self.thread_count.fetch_add(gap, Ordering::Release);
+            idle_sub = cur_idle;
+        } else {
+            idle_sub = thread_count;
+        }
+        self.threads_idle.fetch_sub(idle_sub, Ordering::Release);
+        drop(_guard);
+
         let (sender, receiver) = bounded(0); // rendezvous channel
         for _ in 0..thread_count {
             self.sender.send(GroupMessage::NewGroup(receiver.clone())).unwrap();
@@ -80,7 +101,7 @@ impl ThreadSea {
             for group_msg in my_local.receiver {
                 match group_msg {
                     GroupMessage::NewGroup(channel) => {
-                        my_local.threads_idle.fetch_sub(1, Ordering::Release);
+                        //my_local.threads_idle.fetch_sub(1, Ordering::Release);
                         // We got reserved for a thread pool
                         for job in channel {
                             unsafe {
@@ -88,7 +109,8 @@ impl ThreadSea {
                             }
                         }
                         // sender dropped, so we leave the group
-                        my_local.threads_idle.fetch_add(1, Ordering::Release);
+                        //dbg!("Thread back to idle");
+                        my_local.threads_idle.fetch_sub(1, Ordering::Release);
                     }
                     GroupMessage::Free => {}
                 }
@@ -336,3 +358,50 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+
+mod sea_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    #[allow(deprecated)]
+    fn sleep_ms(x: u32) {
+        std::thread::sleep_ms(x)
+    }
+
+    #[test]
+    fn recursive() {
+        let sea = ThreadSea::new(50);
+        let pool1 = sea.reserve(25);
+
+        pool1.recursive_join(0..127, |x| {
+            let len = x.end - x.start;
+            let mid = x.start + len / 2;
+            if len > 3 {
+                (x.start..mid, Some(mid..x.end))
+            } else {
+                (x, None)
+            }
+            
+        },
+        |value| {
+            println!("Thread: {:?}", value);
+        });
+        drop(pool1);
+        let pool2 = sea.reserve(50);
+
+        pool2.recursive_join(0..127, |x| {
+            let len = x.end - x.start;
+            let mid = x.start + len / 2;
+            if len > 3 {
+                (x.start..mid, Some(mid..x.end))
+            } else {
+                (x, None)
+            }
+            
+        },
+        |value| {
+            println!("Thread: {:?}", value);
+        });
+    }
+}
