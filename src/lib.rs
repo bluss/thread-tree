@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
+use std::mem;
 use std::thread;
 
 mod unwind;
@@ -120,6 +121,152 @@ impl ThreadSea {
                 //my_local.threads_available.fetch_sub(1, Ordering::Release);
             }
         });
+    }
+
+    fn make_tree(&self) -> Fork
+    {
+        panic!()
+    }
+
+    // Build thread tree
+    //
+    // (1)
+    // >> (a)
+    // >> b
+    // > 2
+    // >> (c)
+    // >> d
+    //
+    // Only three threads needed to have four leaves:
+    //
+    // leaves 1a, 1b, 2c, 2d but with threads 1a (main), b, 2, and 2d.
+    //      (root)
+    //   (1)      2 
+    // (a)  b  (c)  d
+    // 
+    // 2: Fork with no children and 1 sender to d
+    // 1: Fork with no children and 1 sender to b
+    // root: Fork with children 1 and 2; sender to 2
+    //
+    //       1   <- node numbering?
+    //      2 3
+    //    4 5 6 7
+    //   8 - 15 then 16 - 32 etc
+}
+
+type ForkMsg = JobRef;
+
+#[derive(Debug)]
+pub struct Fork {
+    index: usize,
+    sender: Option<Sender<ForkMsg>>,
+    child: Option<[Arc<Fork>; 2]>,
+}
+
+impl Fork {
+    #[inline]
+    fn stub() -> Self {
+        Fork { index: 0, sender: None, child: None }
+    }
+
+    pub fn build1(number: usize) -> Arc<Self>
+    {
+        Arc::new(Fork { index: number, sender: Some(Self::add_thread()), child: None })
+    }
+
+    pub fn build3() -> Arc<Self>
+    {
+        let fork_2 = Self::build1(2);
+        let fork_3 = Self::build1(3);
+        let fork_1 = Arc::new(Fork { index: 1, sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])});
+        fork_1
+    }
+
+    fn add_thread() -> Sender<ForkMsg>
+    {
+        let (sender, receiver) = bounded::<ForkMsg>(1); // buffered, we know we have a connection
+        std::thread::spawn(move || {
+            let abort_guard = unwind::AbortIfPanic;
+            for job in receiver {
+                unsafe {
+                    job.execute()
+                }
+            }
+            mem::forget(abort_guard);
+        });
+        sender
+    }
+}
+
+#[derive(Debug)]
+pub struct ForkCtx<'a> {
+    pub fork: &'a Fork,
+    _not_send_sync: *const (),
+}
+
+impl ForkCtx<'_> {
+    //pub fn fork(&self) -> &Fork { self.fork }
+}
+
+impl Fork
+{
+    /// Warning: functions a and b must not panic (this function will abort on panic).
+    pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where A: FnOnce(ForkCtx) -> RA + Send,
+              B: FnOnce(ForkCtx) -> RB + Send,
+              RA: Send,
+              RB: Send,
+    {
+        let no_fork = Fork::stub();
+        let fork_a;
+        let fork_b;
+        match &self.child {
+            None => {
+                fork_a = &no_fork;
+                fork_b = &no_fork;
+            }
+            Some([fa, fb]) => {
+                fork_a = &*fa;
+                fork_b = &*fb;
+            }
+        };
+        assert!(self.sender.is_some());
+
+        unsafe {
+            let a = move || a(ForkCtx { fork: fork_a, _not_send_sync: &() });
+            let b = move || b(ForkCtx { fork: fork_b, _not_send_sync: &() });
+
+            // first send B, if any thread is idle
+            let b_job = StackJob::new(b); // plant this safely on the stack
+            let b_job_ref = JobRef::new(&b_job);
+            let b_runs_here = match self.sender {
+                Some(ref s) => { s.send(b_job_ref).unwrap(); None }
+                None => Some(b_job_ref),
+            };
+
+            let a_result;
+            {
+                // Ensure that we will later wait for B, if it is running on
+                // another thread. Both in the case of A panic or regular scope exit.
+                //
+                // If job A panics, we still cannot return until we are sure that job
+                // B is complete. This is because it may contain references into the
+                // enclosing stack frame(s).
+                let _wait_for_b_guard = match b_runs_here {
+                    None => Some(WaitForJobGuard::new(&b_job)),
+                    Some(_) => None,
+                };
+
+                // Execute task A
+                a_result = a();
+
+                if let Some(b_job_ref) = b_runs_here {
+                    b_job_ref.execute();
+                }
+                // wait for b here
+            }
+            (a_result, b_job.into_result())
+        }
     }
 }
 
