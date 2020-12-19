@@ -153,17 +153,52 @@ impl ThreadSea {
     //   8 - 15 then 16 - 32 etc
 }
 
+type ForkMsg = JobRef;
+
 #[derive(Debug)]
 pub struct Fork {
     index: usize,
-    sender: Option<Sender<JobRef>>,
+    sender: Option<Sender<ForkMsg>>,
     child: Option<[Arc<Fork>; 2]>,
+}
+
+impl Fork {
+
+    pub fn build1(number: usize) -> Arc<Self>
+    {
+        Arc::new(Fork { index: number, sender: Some(Self::add_thread()), child: None })
+    }
+
+    pub fn build3() -> Arc<Self>
+    {
+        let fork_2 = Self::build1(2);
+        let fork_3 = Self::build1(3);
+        let fork_1 = Arc::new(Fork { index: 1, sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])});
+        fork_1
+    }
+
+    fn add_thread() -> Sender<ForkMsg>
+    {
+        let (sender, receiver) = bounded::<ForkMsg>(1); // buffered, we know we have a connection
+        std::thread::spawn(move || {
+            for job in receiver {
+                unsafe {
+                    job.execute()
+                }
+            }
+        });
+        sender
+    }
 }
 
 #[derive(Debug)]
 pub struct ForkCtx<'a> {
-    fork: &'a Fork,
+    pub fork: &'a Fork,
     _not_send_sync: *const (),
+}
+
+impl ForkCtx<'_> {
+    //pub fn fork(&self) -> &Fork { self.fork }
 }
 
 impl Fork
@@ -187,7 +222,7 @@ impl Fork
                 fork_b = &*fb;
             }
         };
-
+        assert!(self.sender.is_some());
 
         unsafe {
             let a = move || a(ForkCtx { fork: fork_a, _not_send_sync: &() });
