@@ -43,7 +43,7 @@ struct SeaLocalInfo {
 
 impl ThreadSea {
     pub fn new(thread_count: usize) -> Self {
-        let (sender, receiver) = unbounded(); // magic var
+        let (sender, receiver) = bounded(thread_count); // unsure which kind of channel to use here
         let nthreads = thread_count;
         let thread_count = AtomicUsize::new(nthreads);
         let threads_available = Arc::new(AtomicUsize::new(nthreads));
@@ -80,12 +80,18 @@ impl ThreadSea {
         */
 
         let (sender, receiver) = bounded(0); // rendezvous channel
+        let mut nthreads = 0;
         for _ in 0..thread_count {
-            self.sender.send(receiver.clone()).unwrap();
+            // maybe try_send and only reserve the number of threads that is available?
+            //self.sender.send(receiver.clone()).unwrap();
+            let ret = self.sender.try_send(receiver.clone());
+            if ret.is_ok() { nthreads += 1; }
         }
+        //eprintln!("Reserved {} threads", nthreads);
+        //assert!(nthreads != 0, "Failed to reserve any threads");
         ThreadPool {
             sender,
-            thread_count
+            thread_count: nthreads,
         }
     }
 
@@ -132,6 +138,9 @@ struct LocalInfo {
 
 impl ThreadPool {
     pub fn new(thread_count: usize) -> Self {
+        // A rendezvous channel is used, because to avoid deadlocks,
+        // we need to know for sure that any job we send (in join) will eventually get
+        // completed, while we are waiting.
         let (sender, receiver) = bounded(0); // rendezvous
         let pool = ThreadPool { sender, thread_count };
         for _ in 0..thread_count {
@@ -362,6 +371,13 @@ mod sea_tests {
     }
 
     #[test]
+    fn thread_count_0() {
+        let sea = ThreadSea::new(0);
+        let pool1 = sea.reserve(0);
+        //let pool2 = sea.reserve(1);
+    }
+
+    #[test]
     fn recursive() {
         let sea = ThreadSea::new(50);
         let pool1 = sea.reserve(25);
@@ -380,6 +396,7 @@ mod sea_tests {
             println!("Thread: {:?}", value);
         });
         let pool2 = sea.reserve(50);
+        //let pool2 = sea.reserve(50);
         drop(pool1);
 
         pool2.recursive_join(0..127, |x| {
