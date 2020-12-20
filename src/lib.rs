@@ -229,7 +229,7 @@ impl ThreadTree {
     /// The following example shows using a two-level tree and using context to spawn tasks.
     ///
     /// ```
-    /// use joinpool::{ThreadTree, ThreadTreeCtx};
+    /// use thread_tree::{ThreadTree, ThreadTreeCtx};
     ///
     /// let tp = ThreadTree::new_with_level(2);
     ///
