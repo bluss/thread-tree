@@ -152,7 +152,15 @@ impl ThreadSea {
 // ThreadTree message on the channel (is just a job ref)
 type TTreeMessage = JobRef;
 
-#[derive(Debug, Default)]
+/// A hierarchical thread pool used for splitting work in an branching fashion.
+///
+/// See [`ThreadTree::new_with_level()`] to create a new thread tree,
+/// and see [`ThreadTree::top()`] for a usage example.
+///
+/// The thread tree has the benefit that at each level, jobs can be sent directly to the thread
+/// that is going to execute it - that means there is no contention between waiting threads. The
+/// downside is that the structure of the thread tree is rather static.
+#[derive(Debug)]
 pub struct ThreadTree {
     sender: Option<Sender<TTreeMessage>>,
     child: Option<[Arc<ThreadTree>; 2]>,
@@ -173,8 +181,8 @@ impl ThreadTree {
         self.sender.is_some()
     }
 
-    /// Build a 1-level thread tree (two leaves)
-    pub fn build_2() -> Arc<Self>
+    /// Return a 1-level thread tree (two leaves)
+    pub fn new_level_1() -> Arc<Self>
     {
         Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
     }
@@ -189,12 +197,42 @@ impl ThreadTree {
         if level == 0 {
             Arc::new(Self::stub())
         } else if level == 1 {
-            Self::build_2()
+            Self::new_level_1()
         } else {
             let fork_2 = Self::new_with_level(level - 1);
             let fork_3 = Self::new_with_level(level - 1);
             Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])})
         }
+    }
+
+    /// Get the top thread tree context, where we can inject tasks with join.
+    /// Each job gets a sub-context that can be used to inject tasks further down the corresponding
+    /// branch of the tree.
+    ///
+    /// **Note** to avoid deadlocks, tasks should never be injected into a tree context that
+    /// doesn't belong to the current level. To avoid this should be easy - only call .top() at the
+    /// top level.
+    ///
+    /// The following example shows using a two-level tree and using context to spawn tasks.
+    ///
+    /// ```
+    /// use joinpool::{ThreadTree, ThreadTreeCtx};
+    ///
+    /// let tp = ThreadTree::new_with_level(2);
+    ///
+    /// fn f(index: i32, ctx: ThreadTreeCtx<'_>) -> i32 {
+    ///     // do work in subtasks here
+    ///     let (a, b) = ctx.join(move |_| index + 1, |_| index + 2);
+    ///
+    ///     return a + b;
+    /// }
+    ///
+    /// let (r0, r1) = tp.top().join(|ctx| f(0, ctx), |ctx| f(1, ctx));
+    ///
+    /// assert_eq!(r0 + r1, (0 + 1) + (0 + 2) + (1 + 1) + (1 + 2));
+    /// ```
+    pub fn top(&self) -> ThreadTreeCtx<'_> {
+        ThreadTreeCtx::from(self)
     }
 
     // Create a new thread that executes jobs, and return the channel sender that feeds jobs to
@@ -217,31 +255,34 @@ impl ThreadTree {
     }
 }
 
-#[derive(Debug)]
+/// A level-specific handle to the thread tree, that can be used to inject jobs.
+///
+/// See [`ThreadTree::top()`] for more information.
+#[derive(Debug, Copy, Clone)]
 pub struct ThreadTreeCtx<'a> {
     fork: &'a ThreadTree,
     _not_send_sync: *const (),
 }
 
 impl ThreadTreeCtx<'_> {
-    pub fn get(&self) -> &ThreadTree { self.fork }
+    pub(crate) fn get(&self) -> &ThreadTree { self.fork }
+
     pub(crate) fn from(fork: &ThreadTree) -> ThreadTreeCtx<'_> {
         ThreadTreeCtx { fork, _not_send_sync: &() }
     }
 }
 
-impl ThreadTree
-{
-    /// Run a and b simultaneously
+impl ThreadTreeCtx<'_> {
+    /// Run a and b simultaneously (and return their results, if applicable).
     ///
-    /// A runs on the curren thread while b runs on the sibling thread; each is passed
+    /// A runs on the current thread while b runs on the sibling thread; each is passed
     /// a lower level of the thread tree (if applicable, or a stub if the bottom is reached).
     /// 
     /// Warning: functions that execute on worker threads here must not panic (it will abort on
     /// panic). Out of a and b, at most one will execute on a worker thread from here, and
     /// at least one (or both) will execute on the current thread.
     ///
-    /// Warning: You must not .join() into the same ThreadTree from nested jobs. Nested jobs must
+    /// Warning: You must not .join() into the same tree from nested jobs. Nested jobs must
     /// be spawned using the context that each job receives as the first parameter.
     pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where A: FnOnce(ThreadTreeCtx) -> RA + Send,
@@ -252,7 +293,8 @@ impl ThreadTree
         let no_fork = ThreadTree::stub();
         let fork_a;
         let fork_b;
-        match &self.child {
+        let self_ = self.get();
+        match &self_.child {
             None => {
                 fork_a = &no_fork;
                 fork_b = &no_fork;
@@ -262,7 +304,7 @@ impl ThreadTree
                 fork_b = &*fb;
             }
         };
-        //assert!(self.sender.is_some());
+        //assert!(self_.sender.is_some());
 
         unsafe {
             let a = move || a(ThreadTreeCtx::from(fork_a));
@@ -271,7 +313,7 @@ impl ThreadTree
             // first send B, if any thread is idle
             let b_job = StackJob::new(b); // plant this safely on the stack
             let b_job_ref = JobRef::new(&b_job);
-            let b_runs_here = match self.sender {
+            let b_runs_here = match self_.sender {
                 Some(ref s) => { s.send(b_job_ref).unwrap(); None }
                 None => Some(b_job_ref),
             };
@@ -613,29 +655,29 @@ mod thread_tree_tests {
         let a = AtomicUsize::new(0);
         let b = AtomicUsize::new(0);
 
-        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+        tp.top().join(|_| a.fetch_add(1, Ordering::SeqCst),
                 |_| b.fetch_add(1, Ordering::SeqCst));
         assert_eq!(a.load(Ordering::SeqCst), 1);
         assert_eq!(b.load(Ordering::SeqCst), 1);
 
         let f = || thread::current().id();
-        let (aid, bid) = tp.join(|_| f(), |_| f());
+        let (aid, bid) = tp.top().join(|_| f(), |_| f());
         assert_eq!(aid, bid);
     }
 
     #[test]
-    fn build_2() {
-        let tp = ThreadTree::build_2();
+    fn new_level_1() {
+        let tp = ThreadTree::new_level_1();
         let a = AtomicUsize::new(0);
         let b = AtomicUsize::new(0);
 
-        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+        tp.top().join(|_| a.fetch_add(1, Ordering::SeqCst),
                 |_| b.fetch_add(1, Ordering::SeqCst));
         assert_eq!(a.load(Ordering::SeqCst), 1);
         assert_eq!(b.load(Ordering::SeqCst), 1);
 
         let f = || thread::current().id();
-        let (aid, bid) = tp.join(|_| f(), |_| f());
+        let (aid, bid) = tp.top().join(|_| f(), |_| f());
         assert_ne!(aid, bid);
     }
 
@@ -645,15 +687,15 @@ mod thread_tree_tests {
         let a = AtomicUsize::new(0);
         let b = AtomicUsize::new(0);
 
-        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+        tp.top().join(|_| a.fetch_add(1, Ordering::SeqCst),
                 |_| b.fetch_add(1, Ordering::SeqCst));
         assert_eq!(a.load(Ordering::SeqCst), 1);
         assert_eq!(b.load(Ordering::SeqCst), 1);
 
         let f = || thread::current().id();
-        let ((aid, bid), (cid, did)) = tp.join(
-            |tp1| tp1.get().join(|_| f(), |_| f()),
-            |tp1| tp1.get().join(|_| f(), |_| f()));
+        let ((aid, bid), (cid, did)) = tp.top().join(
+            |tp1| tp1.join(|_| f(), |_| f()),
+            |tp1| tp1.join(|_| f(), |_| f()));
         assert_ne!(aid, bid);
         assert_ne!(aid, cid);
         assert_ne!(aid, did);
@@ -664,10 +706,9 @@ mod thread_tree_tests {
 
     #[test]
     fn overload_2_2() {
-        let global = ThreadTree::build_2();
+        let global = ThreadTree::new_level_1();
         let tp = ThreadTree::new_with_level(2);
         let a = AtomicUsize::new(0);
-        let b = AtomicUsize::new(0);
 
         let range = 0..100;
 
@@ -678,12 +719,12 @@ mod thread_tree_tests {
                     sleep_ms(1);
                 }
             };
-            ctx.get().join(|_| subwork(), |_| subwork());
+            ctx.join(|_| subwork(), |_| subwork());
         };
 
-        global.join(
-            |_| tp.join(work, work),
-            |_| tp.join(work, work));
+        global.top().join(
+            |_| tp.top().join(work, work),
+            |_| tp.top().join(work, work));
 
         let sum = range.clone().sum::<usize>();
 
@@ -701,7 +742,7 @@ mod thread_tree_tests {
 
         let tp = ThreadTree::new_with_level(TREE_LEVEL);
 
-        fn f(tp: &ThreadTree, depth: usize) {
+        fn f(tp: ThreadTreeCtx<'_>, depth: usize) {
             COUNT.fetch_add(1, Ordering::SeqCst);
             THREADS.lock().unwrap().insert(thread::current().id());
             if depth >= MAX_DEPTH {
@@ -709,15 +750,15 @@ mod thread_tree_tests {
             }
             tp.join(
                 |ctx| {
-                    f(ctx.get(), depth + 1);
+                    f(ctx, depth + 1);
                 },
                 |ctx| {
-                    f(ctx.get(), depth + 1);
+                    f(ctx, depth + 1);
                 });
         }
 
         COUNT.fetch_add(2, Ordering::SeqCst); // for the two invocations below.
-        tp.join(|ctx| f(ctx.get(), 2), |ctx| f(ctx.get(), 2));
+        tp.top().join(|ctx| f(ctx, 2), |ctx| f(ctx, 2));
         let visited_threads = THREADS.lock().unwrap().len();
         assert_eq!(visited_threads, 1 << TREE_LEVEL);
         assert_eq!(COUNT.load(Ordering::SeqCst), 1 << MAX_DEPTH);
