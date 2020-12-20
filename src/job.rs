@@ -8,7 +8,7 @@ use super::unwind;
 pub enum JobResult<T> {
     None,
     Ok(T),
-    Panic(Box<Any + Send>),
+    Panic(Box<dyn Any + Send>),
 }
 
 // from rayon

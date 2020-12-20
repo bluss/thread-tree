@@ -1,6 +1,8 @@
-## Joinpool
+## Thread tree
 
-Based on rayon-core by Niko Matsakis and Josh Stone.
+A tree-structured thread pool.
+
+Stack jobs and job execution based on rayon-core by Niko Matsakis and Josh Stone.
 
 Experimental simple thread pool used for spawning stack-bound scoped jobs with no work stealing.
 
@@ -15,8 +17,7 @@ This is not good for:
 
 
 
-Ideas
+### Wild ideas and notes
 
-Always have threads >= 1
+Possibly allow reserving a subbranch of the tree.
 
-Shrink threads by messaging Exit message - first thread to pick up, is free and exits

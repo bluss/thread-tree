@@ -1,8 +1,28 @@
 [package]
-name = "joinpool"
-version = "0.1.0"
+name = "thread-tree"
+version = "0.2.0"
 authors = ["bluss <>"]
 edition = "2018"
 
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+repository = "https://github.com/bluss/thread-tree"
+documentation = "https://docs.rs/thread-tree"
+description = """
+A tree-structured thread pool for splitting jobs hierarchically on worker threads.
+
+The tree structure means that there is no contention between workers when delivering jobs.
+"""
+
+keywords = ["threadpool", "thread", "pool", "tree", "parallelism"]
+categories = ["concurrency"]
+
 [dependencies]
 crossbeam-channel = "0.5"
+
+[dev-dependencies]
+once_cell = "1.5"
+
+[features]
+unstable-thread-sea = []
