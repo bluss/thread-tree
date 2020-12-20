@@ -1,11 +1,11 @@
 
 
 // Based on rayon-core by Niko Matsakis and Josh Stone
-use crossbeam_channel::{Sender, Receiver, unbounded, bounded};
+use crossbeam_channel::{Sender, Receiver, bounded};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use parking_lot::Mutex;
+//use parking_lot::Mutex;
 
 use std::mem;
 use std::thread;
@@ -30,7 +30,7 @@ pub struct ThreadSea {
     receiver: Receiver<GroupMessage>,
     thread_count: AtomicUsize,
     threads_available: Arc<AtomicUsize>,
-    grow_lock: Mutex<()>,
+    //grow_lock: Mutex<()>,
     thread_id: AtomicUsize,
 }
 
@@ -48,9 +48,9 @@ impl ThreadSea {
         let nthreads = thread_count;
         let thread_count = AtomicUsize::new(nthreads);
         let threads_available = Arc::new(AtomicUsize::new(nthreads));
-        let grow_lock = Mutex::default();
+        //let grow_lock = Mutex::default();
         let thread_id = AtomicUsize::new(0);
-        let pool = ThreadSea { sender, receiver, threads_available, thread_count, grow_lock, thread_id };
+        let pool = ThreadSea { sender, receiver, threads_available, thread_count, thread_id };
         for _ in 0..nthreads {
             pool.add_thread();
         }
@@ -123,11 +123,6 @@ impl ThreadSea {
         });
     }
 
-    fn make_tree(&self) -> Fork
-    {
-        panic!()
-    }
-
     // Build thread tree
     //
     // (1)
@@ -154,37 +149,61 @@ impl ThreadSea {
     //   8 - 15 then 16 - 32 etc
 }
 
-type ForkMsg = JobRef;
+// ThreadTree message on the channel (is just a job ref)
+type TTreeMessage = JobRef;
 
-#[derive(Debug)]
-pub struct Fork {
-    index: usize,
-    sender: Option<Sender<ForkMsg>>,
-    child: Option<[Arc<Fork>; 2]>,
+#[derive(Debug, Default)]
+pub struct ThreadTree {
+    sender: Option<Sender<TTreeMessage>>,
+    child: Option<[Arc<ThreadTree>; 2]>,
 }
 
-impl Fork {
+// Idea for later: implement reservations of (parts of) the tree?
+// So that a 2-2 tree can be used as two separate 1-2 trees simultaneously
+
+impl ThreadTree {
     #[inline]
-    fn stub() -> Self {
-        Fork { index: 0, sender: None, child: None }
+    pub fn stub() -> Self {
+        ThreadTree { sender: None, child: None }
     }
 
-    pub fn build1(number: usize) -> Arc<Self>
-    {
-        Arc::new(Fork { index: number, sender: Some(Self::add_thread()), child: None })
+    /// Return true if this is a non-dummy pool which will parallelize in join
+    #[inline]
+    pub fn is_parallel(&self) -> bool {
+        self.sender.is_some()
     }
 
-    pub fn build3() -> Arc<Self>
+    /// Build a 1-level thread tree (two leaves)
+    pub fn build_2() -> Arc<Self>
     {
-        let fork_2 = Self::build1(2);
-        let fork_3 = Self::build1(3);
-        let fork_1 = Arc::new(Fork { index: 1, sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])});
-        fork_1
+        Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
     }
 
-    fn add_thread() -> Sender<ForkMsg>
-    {
-        let (sender, receiver) = bounded::<ForkMsg>(1); // buffered, we know we have a connection
+    /// Build an n-level thread tree with 2**n leaves
+    ///
+    /// Level must be <= 12; panics on invalid input
+    pub fn new_with_level(level: usize) -> Arc<Self> {
+        assert!(level <= 12,
+                "Input exceeds maximum level 12 (equivalent to 2**12 - 1 threads), got level='{}'",
+                level);
+        if level == 0 {
+            Arc::new(Self::stub())
+        } else if level == 1 {
+            Self::build_2()
+        } else {
+            let fork_2 = Self::new_with_level(level - 1);
+            let fork_3 = Self::new_with_level(level - 1);
+            Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])})
+        }
+    }
+
+    // Create a new thread that executes jobs, and return the channel sender that feeds jobs to
+    // this thread.
+    //
+    // Notice that jobs are executed with a panic guard, that makes the whole program abort if a
+    // job panics. Jobs should not panic.
+    fn add_thread() -> Sender<TTreeMessage> {
+        let (sender, receiver) = bounded::<TTreeMessage>(1); // buffered, we know we have a connection
         std::thread::spawn(move || {
             let abort_guard = unwind::AbortIfPanic;
             for job in receiver {
@@ -199,25 +218,38 @@ impl Fork {
 }
 
 #[derive(Debug)]
-pub struct ForkCtx<'a> {
-    pub fork: &'a Fork,
+pub struct ThreadTreeCtx<'a> {
+    fork: &'a ThreadTree,
     _not_send_sync: *const (),
 }
 
-impl ForkCtx<'_> {
-    //pub fn fork(&self) -> &Fork { self.fork }
+impl ThreadTreeCtx<'_> {
+    pub fn get(&self) -> &ThreadTree { self.fork }
+    pub(crate) fn from(fork: &ThreadTree) -> ThreadTreeCtx<'_> {
+        ThreadTreeCtx { fork, _not_send_sync: &() }
+    }
 }
 
-impl Fork
+impl ThreadTree
 {
-    /// Warning: functions a and b must not panic (this function will abort on panic).
+    /// Run a and b simultaneously
+    ///
+    /// A runs on the curren thread while b runs on the sibling thread; each is passed
+    /// a lower level of the thread tree (if applicable, or a stub if the bottom is reached).
+    /// 
+    /// Warning: functions that execute on worker threads here must not panic (it will abort on
+    /// panic). Out of a and b, at most one will execute on a worker thread from here, and
+    /// at least one (or both) will execute on the current thread.
+    ///
+    /// Warning: You must not .join() into the same ThreadTree from nested jobs. Nested jobs must
+    /// be spawned using the context that each job receives as the first parameter.
     pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-        where A: FnOnce(ForkCtx) -> RA + Send,
-              B: FnOnce(ForkCtx) -> RB + Send,
+        where A: FnOnce(ThreadTreeCtx) -> RA + Send,
+              B: FnOnce(ThreadTreeCtx) -> RB + Send,
               RA: Send,
               RB: Send,
     {
-        let no_fork = Fork::stub();
+        let no_fork = ThreadTree::stub();
         let fork_a;
         let fork_b;
         match &self.child {
@@ -230,11 +262,11 @@ impl Fork
                 fork_b = &*fb;
             }
         };
-        assert!(self.sender.is_some());
+        //assert!(self.sender.is_some());
 
         unsafe {
-            let a = move || a(ForkCtx { fork: fork_a, _not_send_sync: &() });
-            let b = move || b(ForkCtx { fork: fork_b, _not_send_sync: &() });
+            let a = move || a(ThreadTreeCtx::from(fork_a));
+            let b = move || b(ThreadTreeCtx::from(fork_b));
 
             // first send B, if any thread is idle
             let b_job = StackJob::new(b); // plant this safely on the stack
@@ -510,12 +542,7 @@ mod tests {
 
 mod sea_tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
     #[allow(deprecated)]
-    fn sleep_ms(x: u32) {
-        std::thread::sleep_ms(x)
-    }
 
     #[test]
     fn thread_count_0() {
@@ -559,5 +586,140 @@ mod sea_tests {
         |value| {
             println!("Thread: {:?}", value);
         });
+    }
+}
+
+#[cfg(test)]
+mod thread_tree_tests {
+    use super::*;
+    #[allow(deprecated)]
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    use once_cell::sync::Lazy;
+    use std::collections::HashSet;
+    use std::thread;
+    use std::thread::ThreadId;
+
+    #[allow(deprecated)]
+    fn sleep_ms(x: u32) {
+        std::thread::sleep_ms(x)
+    }
+
+    #[test]
+    fn stub() {
+        let tp = ThreadTree::stub();
+        let a = AtomicUsize::new(0);
+        let b = AtomicUsize::new(0);
+
+        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+                |_| b.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert_eq!(b.load(Ordering::SeqCst), 1);
+
+        let f = || thread::current().id();
+        let (aid, bid) = tp.join(|_| f(), |_| f());
+        assert_eq!(aid, bid);
+    }
+
+    #[test]
+    fn build_2() {
+        let tp = ThreadTree::build_2();
+        let a = AtomicUsize::new(0);
+        let b = AtomicUsize::new(0);
+
+        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+                |_| b.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert_eq!(b.load(Ordering::SeqCst), 1);
+
+        let f = || thread::current().id();
+        let (aid, bid) = tp.join(|_| f(), |_| f());
+        assert_ne!(aid, bid);
+    }
+
+    #[test]
+    fn build_level_2() {
+        let tp = ThreadTree::new_with_level(2);
+        let a = AtomicUsize::new(0);
+        let b = AtomicUsize::new(0);
+
+        tp.join(|_| a.fetch_add(1, Ordering::SeqCst),
+                |_| b.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert_eq!(b.load(Ordering::SeqCst), 1);
+
+        let f = || thread::current().id();
+        let ((aid, bid), (cid, did)) = tp.join(
+            |tp1| tp1.get().join(|_| f(), |_| f()),
+            |tp1| tp1.get().join(|_| f(), |_| f()));
+        assert_ne!(aid, bid);
+        assert_ne!(aid, cid);
+        assert_ne!(aid, did);
+        assert_ne!(bid, cid);
+        assert_ne!(bid, did);
+        assert_ne!(cid, did);
+    }
+
+    #[test]
+    fn overload_2_2() {
+        let global = ThreadTree::build_2();
+        let tp = ThreadTree::new_with_level(2);
+        let a = AtomicUsize::new(0);
+        let b = AtomicUsize::new(0);
+
+        let range = 0..100;
+
+        let work = |ctx: ThreadTreeCtx<'_>| {
+            let subwork = || {
+                for i in range.clone() {
+                    a.fetch_add(i, Ordering::Relaxed);
+                    sleep_ms(1);
+                }
+            };
+            ctx.get().join(|_| subwork(), |_| subwork());
+        };
+
+        global.join(
+            |_| tp.join(work, work),
+            |_| tp.join(work, work));
+
+        let sum = range.clone().sum::<usize>();
+
+        assert_eq!(sum * 4 * 2, a.load(Ordering::SeqCst));
+
+    }
+
+    #[test]
+    fn deep_tree() {
+        static THREADS: Lazy<Mutex<HashSet<ThreadId>>> = Lazy::new(|| Mutex::default());
+        const TREE_LEVEL: usize = 8;
+        const MAX_DEPTH: usize = 12;
+
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        let tp = ThreadTree::new_with_level(TREE_LEVEL);
+
+        fn f(tp: &ThreadTree, depth: usize) {
+            COUNT.fetch_add(1, Ordering::SeqCst);
+            THREADS.lock().unwrap().insert(thread::current().id());
+            if depth >= MAX_DEPTH {
+                return;
+            }
+            tp.join(
+                |ctx| {
+                    f(ctx.get(), depth + 1);
+                },
+                |ctx| {
+                    f(ctx.get(), depth + 1);
+                });
+        }
+
+        COUNT.fetch_add(2, Ordering::SeqCst); // for the two invocations below.
+        tp.join(|ctx| f(ctx.get(), 2), |ctx| f(ctx.get(), 2));
+        let visited_threads = THREADS.lock().unwrap().len();
+        assert_eq!(visited_threads, 1 << TREE_LEVEL);
+        assert_eq!(COUNT.load(Ordering::SeqCst), 1 << MAX_DEPTH);
     }
 }
