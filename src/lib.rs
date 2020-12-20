@@ -24,6 +24,12 @@ macro_rules! debug { ($($t:tt)*) => {} }
 type Message = JobRef;
 type GroupMessage = Receiver<Message>;
 
+/// A macro thread pool that acts as a reservoir (a *Sea*) of threads,
+/// from which you can checkout/reserve a thread pool of *n* threads.
+///
+/// Checking out threads from the thread pool has the advantage that contention between threads is
+/// reduced when assigning work. The downside is that it is not always possible to reserve a
+/// thread pool of the right size, if it is already in use.
 #[derive(Debug)]
 pub struct ThreadSea {
     sender: Sender<GroupMessage>,
@@ -345,6 +351,7 @@ impl ThreadTreeCtx<'_> {
 }
 
 
+/// A thread pool based on rendezvous channels
 #[derive(Debug)]
 pub struct ThreadPool {
     sender: Sender<JobRef>,
@@ -358,6 +365,7 @@ struct LocalInfo {
 }
 
 impl ThreadPool {
+    /// Create a new thread pool with `thread_count` worker threads.
     pub fn new(thread_count: usize) -> Self {
         // A rendezvous channel is used, because to avoid deadlocks,
         // we need to know for sure that any job we send (in join) will eventually get
@@ -370,6 +378,7 @@ impl ThreadPool {
         pool
     }
 
+    /// Get the current pool thread count
     pub fn thread_count(&self) -> usize { self.thread_count }
 
     fn add_thread(&self, receiver: &Receiver<JobRef>) {
@@ -384,6 +393,14 @@ impl ThreadPool {
         });
     }
 
+    /// Run a and b simultaneously (and return their results, if applicable).
+    ///
+    /// A runs on the current thread while b runs on the sibling thread (also on current thread, if
+    /// no other thread is available).
+    ///
+    /// A join uses *one* thread from the worker pool at most, this is because the job is split
+    /// between the current thread and another working thread. Of course, in recursive splits, it
+    /// may be the case that the current thread is a thread from the pool, too.
     pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where A: FnOnce() -> RA + Send,
               B: FnOnce() -> RB + Send,
