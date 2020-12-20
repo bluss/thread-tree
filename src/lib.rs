@@ -283,9 +283,13 @@ impl ThreadTreeCtx<'_> {
     pub(crate) fn from(fork: &ThreadTree) -> ThreadTreeCtx<'_> {
         ThreadTreeCtx { fork, _not_send_sync: &() }
     }
-}
 
-impl ThreadTreeCtx<'_> {
+    /// Return true if this level will parallelize in join (or if we are at the bottom of the tree)
+    #[inline]
+    pub fn is_parallel(&self) -> bool {
+        self.get().is_parallel()
+    }
+
     /// Run a and b simultaneously (and return their results, if applicable).
     ///
     /// A runs on the current thread while b runs on the sibling thread; each is passed
@@ -315,7 +319,7 @@ impl ThreadTreeCtx<'_> {
             let a = move || a(ThreadTreeCtx::from(fork_a));
             let b = move || b(ThreadTreeCtx::from(fork_b));
 
-            // first send B, if any thread is idle
+            // first send B to the sibling thread
             let b_job = StackJob::new(b); // plant this safely on the stack
             let b_job_ref = JobRef::new(&b_job);
             let b_runs_here = match self_.sender {
@@ -694,6 +698,7 @@ mod thread_tree_tests {
         let f = || thread::current().id();
         let (aid, bid) = tp.top().join(|_| f(), |_| f());
         assert_eq!(aid, bid);
+        assert!(!tp.top().is_parallel());
     }
 
     #[test]
@@ -710,6 +715,7 @@ mod thread_tree_tests {
         let f = || thread::current().id();
         let (aid, bid) = tp.top().join(|_| f(), |_| f());
         assert_ne!(aid, bid);
+        assert!(tp.top().is_parallel());
     }
 
     #[test]
