@@ -176,8 +176,15 @@ pub struct ThreadTree {
 // So that a 2-2 tree can be used as two separate 1-2 trees simultaneously
 
 impl ThreadTree {
+    const BOTTOM: &'static Self = &ThreadTree::const_stub();
+
     #[inline]
     pub fn stub() -> Self {
+        Self::const_stub()
+    }
+
+    #[inline]
+    pub(crate) const fn const_stub() -> Self {
         ThreadTree { sender: None, child: None }
     }
 
@@ -296,19 +303,11 @@ impl ThreadTreeCtx<'_> {
               RA: Send,
               RB: Send,
     {
-        let no_fork = ThreadTree::stub();
-        let fork_a;
-        let fork_b;
+        let bottom_level = ThreadTree::BOTTOM;
         let self_ = self.get();
-        match &self_.child {
-            None => {
-                fork_a = &no_fork;
-                fork_b = &no_fork;
-            }
-            Some([fa, fb]) => {
-                fork_a = &*fa;
-                fork_b = &*fb;
-            }
+        let (fork_a, fork_b) = match &self_.child {
+            None => (bottom_level, bottom_level),
+            Some([fa, fb]) => (&**fa, &**fb),
         };
         //assert!(self_.sender.is_some());
 
