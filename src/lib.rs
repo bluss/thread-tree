@@ -423,25 +423,33 @@ impl ThreadPool {
         }
     }
 
-    pub fn recursive_join<S, FS, FA>(&self, seed: S, splitter: FS, for_each: FA)
+    /// Take the `seed`, split it recursively using the splitter (until it does not split it
+    /// anymore); execute the parts as jobs on the thread pool, use function `combine` to combine
+    /// the return values.
+    pub fn recursive_fork_join<S, FS, FE, FC, R>(&self, seed: S, splitter: FS, for_each: FE, combine: FC) -> R
         where FS: Fn(S) -> (S, Option<S>) + Sync,
-              FA: Fn(S) + Sync,
+              FE: Fn(S) -> R + Sync,
+              FC: Fn(R, R) -> R + Sync,
+              R: Send,
               S: Send,
     {
-        self.recursive_join_(seed, &splitter, &for_each);
+        self.recursive_join_(seed, &splitter, &for_each, &combine)
     }
 
-    fn recursive_join_<S, FS, FA>(&self, seed: S, splitter: &FS, for_each: &FA)
+    fn recursive_join_<S, FS, FE, FC, R>(&self, seed: S, splitter: &FS, for_each: &FE, combine: &FC) -> R
         where FS: Fn(S) -> (S, Option<S>) + Sync,
-              FA: Fn(S) + Sync,
-              S: Send
+              FE: Fn(S) -> R + Sync,
+              FC: Fn(R, R) -> R + Sync,
+              R: Send,
+              S: Send,
     {
         match splitter(seed) {
             (single, None) => for_each(single),
             (first, Some(second)) => {
-                self.join(
-                    move || self.recursive_join_(first, splitter, for_each),
-                    move || self.recursive_join_(second, splitter, for_each));
+                let (a, b) = self.join(
+                    move || self.recursive_join_(first, splitter, for_each, combine),
+                    move || self.recursive_join_(second, splitter, for_each, combine));
+                combine(a, b)
             }
         }
     }
@@ -519,7 +527,7 @@ mod tests {
     #[test]
     fn recursive() {
         let pool = ThreadPool::new(50);
-        pool.recursive_join(0..127, |x| {
+        let ret = pool.recursive_fork_join(0..127, |x| {
             let len = x.end - x.start;
             let mid = x.start + len / 2;
             if len > 3 {
@@ -531,7 +539,10 @@ mod tests {
         },
         |value| {
             println!("Thread: {:?}", value);
-        });
+            value.sum::<i32>()
+        },
+        |a, b| a + b);
+        assert_eq!(ret, (0..127).sum());
     }
 
     #[test]
@@ -598,7 +609,7 @@ mod sea_tests {
         let sea = ThreadSea::new(50);
         let pool1 = sea.reserve(25);
 
-        pool1.recursive_join(0..127, |x| {
+        pool1.recursive_fork_join(0..127, |x| {
             let len = x.end - x.start;
             let mid = x.start + len / 2;
             if len > 3 {
@@ -610,12 +621,14 @@ mod sea_tests {
         },
         |value| {
             println!("Thread: {:?}", value);
-        });
+        },
+        |_, _| ()
+        );
         let pool2 = sea.reserve(50);
         //let pool2 = sea.reserve(50);
         drop(pool1);
 
-        pool2.recursive_join(0..127, |x| {
+        pool2.recursive_fork_join(0..127, |x| {
             let len = x.end - x.start;
             let mid = x.start + len / 2;
             if len > 3 {
@@ -627,7 +640,9 @@ mod sea_tests {
         },
         |value| {
             println!("Thread: {:?}", value);
-        });
+        },
+        |_, _| ()
+        );
     }
 }
 
