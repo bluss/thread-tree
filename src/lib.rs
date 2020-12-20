@@ -1,11 +1,15 @@
 
-
-// Based on rayon-core by Niko Matsakis and Josh Stone
-use crossbeam_channel::{Sender, Receiver, bounded};
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
+// Stack jobs and job execution implementation based on rayon-core by Niko Matsakis and Josh Stone
+//
+use crossbeam_channel::{Sender, bounded};
 use std::sync::Arc;
-//use parking_lot::Mutex;
+
+#[cfg(feature="unstable-thread-sea")]
+use crossbeam_channel::Receiver;
+#[cfg(feature="unstable-thread-sea")]
+use std::sync::atomic::AtomicUsize;
+#[cfg(feature="unstable-thread-sea")]
+use std::sync::atomic::Ordering;
 
 use std::mem;
 use std::thread;
@@ -15,13 +19,9 @@ mod job;
 
 use crate::job::{JobRef, StackJob};
 
-macro_rules! debug {
-    ($($t:tt)*) => { $($t)* }
-}
-
-macro_rules! debug { ($($t:tt)*) => {} }
-
+#[cfg(feature="unstable-thread-sea")]
 type Message = JobRef;
+#[cfg(feature="unstable-thread-sea")]
 type GroupMessage = Receiver<Message>;
 
 /// A macro thread pool that acts as a reservoir (a *Sea*) of threads,
@@ -30,6 +30,7 @@ type GroupMessage = Receiver<Message>;
 /// Checking out threads from the thread pool has the advantage that contention between threads is
 /// reduced when assigning work. The downside is that it is not always possible to reserve a
 /// thread pool of the right size, if it is already in use.
+#[cfg(feature="unstable-thread-sea")]
 #[derive(Debug)]
 pub struct ThreadSea {
     sender: Sender<GroupMessage>,
@@ -40,6 +41,7 @@ pub struct ThreadSea {
     thread_id: AtomicUsize,
 }
 
+#[cfg(feature="unstable-thread-sea")]
 #[derive(Debug)]
 struct SeaLocalInfo {
     receiver: Receiver<GroupMessage>,
@@ -48,6 +50,7 @@ struct SeaLocalInfo {
 }
 
 
+#[cfg(feature="unstable-thread-sea")]
 impl ThreadSea {
     pub fn new(thread_count: usize) -> Self {
         let (sender, receiver) = bounded(thread_count); // unsure which kind of channel to use here
@@ -129,30 +132,6 @@ impl ThreadSea {
         });
     }
 
-    // Build thread tree
-    //
-    // (1)
-    // >> (a)
-    // >> b
-    // > 2
-    // >> (c)
-    // >> d
-    //
-    // Only three threads needed to have four leaves:
-    //
-    // leaves 1a, 1b, 2c, 2d but with threads 1a (main), b, 2, and 2d.
-    //      (root)
-    //   (1)      2 
-    // (a)  b  (c)  d
-    // 
-    // 2: Fork with no children and 1 sender to d
-    // 1: Fork with no children and 1 sender to b
-    // root: Fork with children 1 and 2; sender to 2
-    //
-    //       1   <- node numbering?
-    //      2 3
-    //    4 5 6 7
-    //   8 - 15 then 16 - 32 etc
 }
 
 // ThreadTree message on the channel (is just a job ref)
@@ -172,6 +151,20 @@ pub struct ThreadTree {
     child: Option<[Arc<ThreadTree>; 2]>,
 }
 
+//
+// Only three threads needed to have four leaves, see below.
+//
+// leaves 1a, 1b, 2c, 2d but with threads spawned for nodes 1b, 2 and 2d.
+// Nodes root, 1, 1a, 2c all run in their parent/current thread.
+//
+//      (root)
+//   (1)      2 
+// (a)  b  (c)  d
+// 
+// 2: Fork with no children and 1 sender to d
+// 1: Fork with no children and 1 sender to b
+// root: Fork with children 1 and 2; sender to 2
+//
 // Idea for later: implement reservations of (parts of) the tree?
 // So that a 2-2 tree can be used as two separate 1-2 trees simultaneously
 
@@ -354,6 +347,7 @@ impl ThreadTreeCtx<'_> {
 }
 
 
+#[cfg(feature="unstable-thread-sea")]
 /// A thread pool based on rendezvous channels
 #[derive(Debug)]
 pub struct ThreadPool {
@@ -361,12 +355,14 @@ pub struct ThreadPool {
     thread_count: usize,
 }
 
+#[cfg(feature="unstable-thread-sea")]
 #[derive(Debug)]
 struct LocalInfo {
     //sender: Sender<JobRef>,
     receiver: Receiver<JobRef>,
 }
 
+#[cfg(feature="unstable-thread-sea")]
 impl ThreadPool {
     /// Create a new thread pool with `thread_count` worker threads.
     pub fn new(thread_count: usize) -> Self {
@@ -499,6 +495,7 @@ impl<'a, F, R> Drop for WaitForJobGuard<'a, F, R> {
     }
 }
 
+#[cfg(feature="unstable-thread-sea")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,8 +608,8 @@ mod tests {
     }
 }
 
+#[cfg(feature="unstable-thread-sea")]
 #[cfg(test)]
-
 mod sea_tests {
     use super::*;
     #[allow(deprecated)]

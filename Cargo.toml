@@ -23,3 +23,6 @@ crossbeam-channel = "0.5"
 
 [dev-dependencies]
 once_cell = "1.5"
+
+[features]
+unstable-thread-sea = []
