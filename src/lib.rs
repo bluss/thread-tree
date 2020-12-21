@@ -169,31 +169,19 @@ pub struct ThreadTree {
 // So that a 2-2 tree can be used as two separate 1-2 trees simultaneously
 
 impl ThreadTree {
-    const BOTTOM: &'static Self = &ThreadTree::const_stub();
+    const BOTTOM: &'static Self = &ThreadTree::new_level0();
 
+    /// Create a level 0 tree (with no parallelism)
     #[inline]
-    pub fn stub() -> Self {
-        Self::const_stub()
-    }
-
-    #[inline]
-    pub(crate) const fn const_stub() -> Self {
+    pub const fn new_level0() -> Self {
         ThreadTree { sender: None, child: None }
     }
 
-    /// Return true if this is a non-dummy pool which will parallelize in join
-    #[inline]
-    pub fn is_parallel(&self) -> bool {
-        self.sender.is_some()
-    }
-
-    /// Return a 1-level thread tree (two leaves)
-    pub fn new_level_1() -> Arc<Self>
-    {
-        Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
-    }
-
-    /// Build an n-level thread tree with 2**n leaves
+    /// Create an n-level thread tree with 2<sup>n</sup> leaves
+    ///
+    /// Level 0 has no parallelism
+    /// Level 1 has two nodes
+    /// Level 2 has four nodes (et.c.)
     ///
     /// Level must be <= 12; panics on invalid input
     pub fn new_with_level(level: usize) -> Arc<Self> {
@@ -201,14 +189,20 @@ impl ThreadTree {
                 "Input exceeds maximum level 12 (equivalent to 2**12 - 1 threads), got level='{}'",
                 level);
         if level == 0 {
-            Arc::new(Self::stub())
+            Arc::new(Self::new_level0())
         } else if level == 1 {
-            Self::new_level_1()
+            Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
         } else {
             let fork_2 = Self::new_with_level(level - 1);
             let fork_3 = Self::new_with_level(level - 1);
             Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])})
         }
+    }
+
+    /// Return true if this is a non-dummy pool which will parallelize in join
+    #[inline]
+    pub fn is_parallel(&self) -> bool {
+        self.sender.is_some()
     }
 
     /// Get the top thread tree context, where we can inject tasks with join.
@@ -683,7 +677,7 @@ mod thread_tree_tests {
 
     #[test]
     fn stub() {
-        let tp = ThreadTree::stub();
+        let tp = ThreadTree::new_level0();
         let a = AtomicUsize::new(0);
         let b = AtomicUsize::new(0);
 
@@ -700,7 +694,7 @@ mod thread_tree_tests {
 
     #[test]
     fn new_level_1() {
-        let tp = ThreadTree::new_level_1();
+        let tp = ThreadTree::new_with_level(1);
         let a = AtomicUsize::new(0);
         let b = AtomicUsize::new(0);
 
@@ -740,7 +734,7 @@ mod thread_tree_tests {
 
     #[test]
     fn overload_2_2() {
-        let global = ThreadTree::new_level_1();
+        let global = ThreadTree::new_with_level(1);
         let tp = ThreadTree::new_with_level(2);
         let a = AtomicUsize::new(0);
 
