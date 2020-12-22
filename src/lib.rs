@@ -339,6 +339,45 @@ impl ThreadTreeCtx<'_> {
             (a_result, b_job.into_result())
         }
     }
+
+    /// Branch out twice and join, running three different jobs
+    ///
+    /// Branches twice on the left side and once on the right.
+    /// The closure is called with corresponding thread tree context and an index in 0..3 for the job.
+    pub fn join3l<A, RA>(&self, a: &A) -> ((RA, RA), RA)
+        where A: Fn(ThreadTreeCtx, usize) -> RA + Sync,
+              RA: Send,
+    {
+        self.join(
+            move |ctx| ctx.join(move |ctx| a(ctx, 0), move |ctx| a(ctx, 1)),
+            move |ctx| a(ctx, 2))
+    }
+
+    /// Branch out twice and join, running three different jobs
+    ///
+    /// Branches once on the right side and twice on the right.
+    /// The closure is called with corresponding thread tree context and an index in 0..3 for the job.
+    pub fn join3r<A, RA>(&self, a: &A) -> (RA, (RA, RA))
+        where A: Fn(ThreadTreeCtx, usize) -> RA + Sync,
+              RA: Send,
+    {
+        self.join(
+            move |ctx| a(ctx, 0),
+            move |ctx| ctx.join(move |ctx| a(ctx, 1), move |ctx| a(ctx, 2)))
+    }
+
+    /// Branch out twice and join, running four different jobs.
+    ///
+    /// Branches twice on each side.
+    /// The closure is called with corresponding thread tree context and an index in 0..4 for the job.
+    pub fn join4<A, RA>(&self, a: &A) -> ((RA, RA), (RA, RA))
+        where A: Fn(ThreadTreeCtx, usize) -> RA + Sync,
+              RA: Send,
+    {
+        self.join(
+            move |ctx| ctx.join(move |ctx| a(ctx, 0), move |ctx| a(ctx, 1)),
+            move |ctx| ctx.join(move |ctx| a(ctx, 2), move |ctx| a(ctx, 3)))
+    }
 }
 
 
