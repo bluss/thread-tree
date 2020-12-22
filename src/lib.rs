@@ -2,6 +2,7 @@
 // Stack jobs and job execution implementation based on rayon-core by Niko Matsakis and Josh Stone
 //
 use crossbeam_channel::{Sender, bounded};
+#[cfg(feature="unstable-thread-sea")]
 use std::sync::Arc;
 
 #[cfg(feature="unstable-thread-sea")]
@@ -148,7 +149,7 @@ type TTreeMessage = JobRef;
 #[derive(Debug)]
 pub struct ThreadTree {
     sender: Option<Sender<TTreeMessage>>,
-    child: Option<[Arc<ThreadTree>; 2]>,
+    child: Option<[Box<ThreadTree>; 2]>,
 }
 
 //
@@ -184,18 +185,18 @@ impl ThreadTree {
     /// Level 2 has four nodes (et.c.)
     ///
     /// Level must be <= 12; panics on invalid input
-    pub fn new_with_level(level: usize) -> Arc<Self> {
+    pub fn new_with_level(level: usize) -> Box<Self> {
         assert!(level <= 12,
                 "Input exceeds maximum level 12 (equivalent to 2**12 - 1 threads), got level='{}'",
                 level);
         if level == 0 {
-            Arc::new(Self::new_level0())
+            Box::new(Self::new_level0())
         } else if level == 1 {
-            Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
+            Box::new(ThreadTree { sender: Some(Self::add_thread()), child: None })
         } else {
             let fork_2 = Self::new_with_level(level - 1);
             let fork_3 = Self::new_with_level(level - 1);
-            Arc::new(ThreadTree { sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])})
+            Box::new(ThreadTree { sender: Some(Self::add_thread()), child: Some([fork_2, fork_3])})
         }
     }
 
