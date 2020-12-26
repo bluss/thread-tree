@@ -1,3 +1,6 @@
+//!
+//! A hierarchical thread pool used for splitting work in a branching fashion.
+//!
 
 // Stack jobs and job execution implementation based on rayon-core by Niko Matsakis and Josh Stone
 //
@@ -138,7 +141,7 @@ impl ThreadSea {
 // ThreadTree message on the channel (is just a job ref)
 type TTreeMessage = JobRef;
 
-/// A hierarchical thread pool used for splitting work in an branching fashion.
+/// A hierarchical thread pool used for splitting work in a branching fashion.
 ///
 /// See [`ThreadTree::new_with_level()`] to create a new thread tree,
 /// and see [`ThreadTree::top()`] for a usage example.
@@ -152,19 +155,19 @@ pub struct ThreadTree {
     child: Option<[Box<ThreadTree>; 2]>,
 }
 
-//
 // Only three threads needed to have four leaves, see below.
 //
-// leaves 1a, 1b, 2c, 2d but with threads spawned for nodes 1b, 2 and 2d.
-// Nodes root, 1, 1a, 2c all run in their parent/current thread.
+//           (root)
+//      (1)            2 
+// (1.1)   1.2   (2.1)   2.2
 //
-//      (root)
-//   (1)      2 
-// (a)  b  (c)  d
-// 
-// 2: Fork with no children and 1 sender to d
-// 1: Fork with no children and 1 sender to b
-// root: Fork with children 1 and 2; sender to 2
+// Leaves 1.1, 1.2, 2.1 and 2.2 but only 1.2, 2, and 2.2 are new threads - the others inherit the
+// current thread from the parent.  That means we have a fanout of four (leaves 1.1 trough 2.2)
+// using the current thread and three additional threads.
+//
+// The implementation is such that the root holds ownership of leaf 2, and the root contains a
+// channel sender that passes jobs to the node 2.  Further nodes down continue the same way
+// recursively.
 //
 // Idea for later: implement reservations of (parts of) the tree?
 // So that a 2-2 tree can be used as two separate 1-2 trees simultaneously
