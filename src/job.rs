@@ -41,7 +41,7 @@ impl<F, R> StackJob<F, R> {
         }
     }
     pub fn probe(&self) -> bool {
-        self.latch.load(Ordering::SeqCst)
+        self.latch.load(Ordering::Acquire)
     }
 }
 
@@ -60,7 +60,7 @@ where
             Ok(x) => JobResult::Ok(x),
             Err(x) => JobResult::Panic(x),
         };
-        this.latch.store(true, Ordering::SeqCst);
+        this.latch.store(true, Ordering::Release);
         //this.latch.set();
         mem::forget(abort);
     }
