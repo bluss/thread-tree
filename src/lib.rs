@@ -15,7 +15,6 @@ use std::sync::atomic::AtomicUsize;
 #[cfg(feature="unstable-thread-sea")]
 use std::sync::atomic::Ordering;
 
-use std::mem;
 use std::thread;
 
 mod unwind;
@@ -247,13 +246,11 @@ impl ThreadTree {
     fn add_thread() -> Sender<TTreeMessage> {
         let (sender, receiver) = bounded::<TTreeMessage>(1); // buffered, we know we have a connection
         std::thread::spawn(move || {
-            let abort_guard = unwind::AbortIfPanic;
             for job in receiver {
                 unsafe {
                     job.execute()
                 }
             }
-            mem::forget(abort_guard);
         });
         sender
     }
@@ -283,15 +280,16 @@ impl ThreadTreeCtx<'_> {
         self.get().is_parallel()
     }
 
-    /// Run a and b simultaneously (and return their results, if applicable).
+    /// Branch out and run a and b simultaneously and return their results jointly.
     ///
-    /// A runs on the current thread while b runs on the sibling thread; each is passed
-    /// a lower level of the thread tree (if applicable, or a stub if the bottom is reached).
+    /// Job `a` runs on the current thread while `b` runs on the sibling thread; each is passed
+    /// a lower level of the thread tree.
+    /// If the bottom of the tree is reached, where no sibling threads are available, both `a` and
+    /// `b` run on the current thread.
+    ///
+    /// If either `a` or `b` panics, the panic is propagated here. If both jobs are executing,
+    /// the panic will not propagate until after both jobs have finished.
     /// 
-    /// Warning: functions that execute on worker threads here must not panic (it will abort on
-    /// panic). Out of a and b, at most one will execute on a worker thread from here, and
-    /// at least one (or both) will execute on the current thread.
-    ///
     /// Warning: You must not .join() into the same tree from nested jobs. Nested jobs must
     /// be spawned using the context that each job receives as the first parameter.
     pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
@@ -835,5 +833,57 @@ mod thread_tree_tests {
         let visited_threads = THREADS.lock().unwrap().len();
         assert_eq!(visited_threads, 1 << TREE_LEVEL);
         assert_eq!(COUNT.load(Ordering::SeqCst), 1 << MAX_DEPTH);
+    }
+
+    #[test]
+    #[should_panic]
+    fn panic_a() {
+        let pool = ThreadTree::new_with_level(1);
+        pool.top().join(|_| panic!("Panic in A"), |_| 1 + 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn panic_b() {
+        let pool = ThreadTree::new_with_level(1);
+        pool.top().join(|_| 1 + 1, |_| panic!());
+    }
+
+    #[test]
+    #[should_panic]
+    fn panic_both_in_threads() {
+        let pool = ThreadTree::new_with_level(1);
+        pool.top().join(|_| { sleep_ms(50); panic!("Panic in A") }, |_| panic!("Panic in B"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn panic_both_bottom() {
+        let pool = ThreadTree::new_with_level(0);
+        pool.top().join(|_| { sleep_ms(50); panic!("Panic in A") }, |_| panic!("Panic in B"));
+    }
+
+    #[test]
+    fn on_panic_a_wait_for_b() {
+        let pool = ThreadTree::new_with_level(1);
+        for i in 0..3 {
+            let start = AtomicUsize::new(0);
+            let finish = AtomicUsize::new(0);
+            let result = unwind::halt_unwinding(|| {
+                pool.top().join(
+                    |_| panic!("Panic in A"),
+                    |_| {
+                        start.fetch_add(1, Ordering::SeqCst);
+                        sleep_ms(50);
+                        finish.fetch_add(1, Ordering::SeqCst);
+                    });
+            });
+            let start_count = start.load(Ordering::SeqCst);
+            let finish_count = finish.load(Ordering::SeqCst);
+            assert_eq!(start_count, finish_count);
+            assert!(result.is_err());
+            println!("Pass {} with start: {} == finish {}", i,
+                     start_count, finish_count);
+        }
     }
 }
