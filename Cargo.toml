@@ -1,6 +1,6 @@
 [package]
 name = "thread-tree"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["bluss <>"]
 edition = "2018"
 

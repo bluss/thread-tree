@@ -1,6 +1,16 @@
 //!
 //! A hierarchical thread pool used for splitting work in a branching fashion.
 //!
+//! This thread pool is good for:
+//!
+//! - You want to split work recursively in jobs that use approximately the same time.
+//! - You want thread pool overhead to be low
+//!
+//! This is not good for:
+//!
+//! - You need work stealing
+//! - When you have jobs of uneven size
+//!
 
 // Stack jobs and job execution implementation based on rayon-core by Niko Matsakis and Josh Stone
 //

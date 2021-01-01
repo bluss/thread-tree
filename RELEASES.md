@@ -1,3 +1,10 @@
+Version 0.3.1
+=============
+
+- `.join(a, b)` now allows both jobs a, b to panic and panics are propagated to
+  the caller.
+- Updated job completion flag to use release and acquire orderings.
+
 Version 0.3.0
 =============
 
