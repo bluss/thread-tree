@@ -264,15 +264,17 @@ impl ThreadTree {
 /// See [`ThreadTree::top()`] for more information.
 #[derive(Debug, Copy, Clone)]
 pub struct ThreadTreeCtx<'a> {
-    fork: &'a ThreadTree,
+    tree: &'a ThreadTree,
+    // This handle is marked as non-Send/Sync as a help - there is nothing safety critical about it
+    // - but it helps the user to avoid deadlocks - see the top method.
     _not_send_sync: *const (),
 }
 
 impl ThreadTreeCtx<'_> {
-    pub(crate) fn get(&self) -> &ThreadTree { self.fork }
+    pub(crate) fn get(&self) -> &ThreadTree { self.tree }
 
-    pub(crate) fn from(fork: &ThreadTree) -> ThreadTreeCtx<'_> {
-        ThreadTreeCtx { fork, _not_send_sync: &() }
+    pub(crate) fn from(tree: &ThreadTree) -> ThreadTreeCtx<'_> {
+        ThreadTreeCtx { tree, _not_send_sync: &() }
     }
 
     /// Return true if this level will parallelize in join (or if we are at the bottom of the tree)
