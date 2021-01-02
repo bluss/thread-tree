@@ -244,6 +244,7 @@ impl ThreadTree {
     ///
     /// assert_eq!(r0 + r1, (0 + 1) + (0 + 2) + (1 + 1) + (1 + 2));
     /// ```
+    #[inline]
     pub fn top(&self) -> ThreadTreeCtx<'_> {
         ThreadTreeCtx::from(self)
     }
@@ -278,8 +279,10 @@ pub struct ThreadTreeCtx<'a> {
 }
 
 impl ThreadTreeCtx<'_> {
+    #[inline]
     pub(crate) fn get(&self) -> &ThreadTree { self.tree }
 
+    #[inline]
     pub(crate) fn from(tree: &ThreadTree) -> ThreadTreeCtx<'_> {
         ThreadTreeCtx { tree, _not_send_sync: &() }
     }

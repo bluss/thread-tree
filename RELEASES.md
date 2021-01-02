@@ -1,3 +1,8 @@
+Version 0.3.2
+=============
+
+- Add missing inlines to a few trivial methods (affects .top())
+
 Version 0.3.1
 =============
 
