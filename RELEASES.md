@@ -1,3 +1,8 @@
+Version 0.3.3
+=============
+
+- Remove dead code, including unused feature `unstable-thread-sea`
+
 Version 0.3.2
 =============
 
