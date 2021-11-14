@@ -127,9 +127,6 @@ impl ThreadTree {
 
     // Create a new thread that executes jobs, and return the channel sender that feeds jobs to
     // this thread.
-    //
-    // Notice that jobs are executed with a panic guard, that makes the whole program abort if a
-    // job panics. Jobs should not panic.
     fn add_thread() -> Sender<TTreeMessage> {
         let (sender, receiver) = bounded::<TTreeMessage>(1); // buffered, we know we have a connection
         std::thread::spawn(move || {
